@@ -1,7 +1,7 @@
 package main
 
-import "fmt"
+import "github.com/funkymcb/work-timer/cmd"
 
 func main() {
-	fmt.Println("initial structure")
+	cmd.Execute()
 }
