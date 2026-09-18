@@ -24,16 +24,16 @@ $ work stop
 
 ## Commands
 
-| Command           | Meaning                                  |
+| Command | Meaning |
 | ----------------- | ---------------------------------------- |
-| `work start`      | begin the working day                    |
-| `work pause`      | begin a break                            |
-| `work resume`     | end the break and continue working       |
-| `work stop`       | end the working day                      |
-| `work status`     | show what the timer is doing right now   |
-| `work week`       | show the days and hours of this week     |
-| `work history`    | list every record down to single entries |
-| `work where`      | print the path of the work log directory |
+| `work start` | begin the working day |
+| `work pause` | begin a break |
+| `work resume` | end the break and continue working |
+| `work stop` | end the working day |
+| `work status` | show what the timer is doing right now |
+| `work week` | show the days and hours of this week |
+| `work history` | list every record down to single entries |
+| `work where` | print the path of the work log directory |
 
 `work start`, `pause`, `resume` and `stop` take `--at HH:MM` to record the
 entry at a time that has already passed, e.g. `work resume --at 13:07`.
@@ -202,12 +202,12 @@ Since Tue 15 Sep 2026 · 1 week · 2 working days · 13h 27m worked · 1h 34m on
 
 Three date orders are accepted, told apart by the separator:
 
-| Written           | Read as                | Means      |
+| Written | Read as | Means |
 | ----------------- | ---------------------- | ---------- |
-| `01.10.2024`      | day first, German      | 1 Oct 2024 |
+| `01.10.2024` | day first, German | 1 Oct 2024 |
 | `01.10.24`, `1.10.2024` | same, short year or unpadded | 1 Oct 2024 |
-| `10/01/2024`      | month first, US        | 1 Oct 2024 |
-| `10/1/24`         | same, short year       | 1 Oct 2024 |
+| `10/01/2024` | month first, US | 1 Oct 2024 |
+| `10/1/24` | same, short year | 1 Oct 2024 |
 | `2024-10-01`, `2024/10/01` | year first, ISO | 1 Oct 2024 |
 
 A week that reaches past either end of the range is reported with the days that
@@ -321,7 +321,7 @@ yesterday's session is still open, the commands keep operating on yesterday.
 ▶ 4h18m       working, 4h18m worked so far
 ⏸ 12m         on a break that started 12 minutes ago
 ⏹ 8h36m       done for the day
-⏹ no record   the day has not been started
+⏹ none   the day has not been started
 ```
 
 The symbols are `iconPlay`/`iconPause`/`iconStop` in `cmd/work/main.go`; swap

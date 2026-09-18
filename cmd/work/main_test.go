@@ -24,7 +24,7 @@ func TestTmuxStatus(t *testing.T) {
 			name:  "not started says so instead of leaving the segment blank",
 			build: func() *worklog.Day { return worklog.NewDay(at(8, 0)) },
 			now:   at(9, 0),
-			want:  "⏹ no record",
+			want:  "⏹ none",
 		},
 		{
 			name: "working shows play and net worked time",
