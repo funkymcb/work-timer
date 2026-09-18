@@ -24,18 +24,18 @@ type (
 		// Since and Until are the ends of the range the history was limited
 		// to, each absent when that end is open. A week reaching past either
 		// one is reported with the days inside it, and totalled over those.
-		Since string     `json:"since,omitempty"`
-		Until string     `json:"until,omitempty"`
-		Weeks []weekView `json:"weeks"`
-		// LooseDays are the days no work week covers.
-		LooseDays []dayView  `json:"days_outside_weeks"`
-		Totals    totalsView `json:"totals"`
+		Since  string     `json:"since,omitempty"`
+		Until  string     `json:"until,omitempty"`
+		Weeks  []weekView `json:"weeks"`
+		Totals totalsView `json:"totals"`
 	}
 
 	weekView struct {
-		Start         string    `json:"start"`
-		End           string    `json:"end,omitempty"`
-		Active        bool      `json:"active"`
+		Start string `json:"start"`
+		End   string `json:"end"`
+		// Current marks the week today falls in, the only one whose totals
+		// are still moving.
+		Current       bool      `json:"current"`
 		WorkedMinutes int       `json:"worked_minutes"`
 		BreakMinutes  int       `json:"break_minutes"`
 		Days          []dayView `json:"days"`
@@ -74,14 +74,13 @@ type (
 
 // newHistoryView turns the history into the structure the json and yaml output
 // are written from.
-func newHistoryView(weeks []worklog.WeekReport, loose []*worklog.Day, since, until, now time.Time) historyView {
-	days, worked, breaks := historyTotals(weeks, loose, now)
+func newHistoryView(weeks []worklog.WeekReport, since, until, now time.Time) historyView {
+	days, worked, breaks := historyTotals(weeks)
 	view := historyView{
 		GeneratedAt: now.Format(time.RFC3339),
 		Since:       isoDate(since),
 		Until:       isoDate(until),
 		Weeks:       make([]weekView, 0, len(weeks)),
-		LooseDays:   newDayViews(loose, now),
 		Totals: totalsView{
 			Weeks:         len(weeks),
 			WorkingDays:   days,
@@ -93,7 +92,7 @@ func newHistoryView(weeks []worklog.WeekReport, loose []*worklog.Day, since, unt
 		view.Weeks = append(view.Weeks, weekView{
 			Start:         report.Week.Start,
 			End:           report.Week.End,
-			Active:        report.Week.Active(),
+			Current:       report.Week.Current(now),
 			WorkedMinutes: minutes(report.Worked),
 			BreakMinutes:  minutes(report.Breaks),
 			Days:          newDayViews(report.Days, now),

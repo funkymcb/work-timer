@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// Store persists one JSON file per calendar day, plus one file per work week,
-// in a data directory.
+// Store persists one JSON file per calendar day in a data directory. Weeks are
+// not stored: they are the calendar weeks the recorded days fall in.
 type Store struct {
 	dir string
 }
@@ -125,80 +125,8 @@ func (s *Store) Days(from, to string) ([]*Day, error) {
 	return days, nil
 }
 
-// WeekDays returns the started days that belong to the given week, up to today
-// while the week is still active.
-func (s *Store) WeekDays(week *Week, now time.Time) ([]*Day, error) {
-	to := week.End
-	if week.Active() {
-		to = now.Format(DateLayout)
-	}
-	return s.Days(week.Start, to)
-}
-
-// Report loads the days of a week and totals them up.
-func (s *Store) Report(week *Week, now time.Time) (WeekReport, error) {
-	days, err := s.WeekDays(week, now)
-	if err != nil {
-		return WeekReport{}, err
-	}
-	return NewWeekReport(week, days, now), nil
-}
-
-// History returns a report for every recorded week, oldest first, together
-// with the started days that no week lays claim to. Those loose days are days
-// worked before weeks were kept, or files edited by hand; reporting them keeps
-// the history a complete account of what is on disk.
-//
-// The ISO since and until dates limit the history to the days between them,
-// both included; either may be empty for no limit on that end. A week is then
-// reported with the days that are left of it, and dropped entirely once
-// nothing of it falls inside the range.
-func (s *Store) History(now time.Time, since, until string) (weeks []WeekReport, loose []*Day, err error) {
-	recorded, err := s.Weeks()
-	if err != nil {
-		return nil, nil, err
-	}
-	days, err := s.Days(since, until)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Days arrive in chronological order, so each group keeps that order.
-	grouped := make([][]*Day, len(recorded))
-	for _, day := range days {
-		i := weekOf(recorded, day.Date, now)
-		if i < 0 {
-			loose = append(loose, day)
-			continue
-		}
-		grouped[i] = append(grouped[i], day)
-	}
-
-	weeks = make([]WeekReport, 0, len(recorded))
-	for i, week := range recorded {
-		// A week with no days left is only worth reporting when it is one that
-		// starts inside the range and has nothing logged yet, the way a week
-		// that was just opened has not.
-		if len(grouped[i]) == 0 && (week.Start < since || (until != "" && week.Start > until)) {
-			continue
-		}
-		weeks = append(weeks, NewWeekReport(week, grouped[i], now))
-	}
-	return weeks, loose, nil
-}
-
-// weekOf returns the index of the first week covering the given date, or -1.
-func weekOf(weeks []*Week, date string, now time.Time) int {
-	for i, w := range weeks {
-		if w.Covers(date, now) {
-			return i
-		}
-	}
-	return -1
-}
-
-// dayFileDate returns the date encoded in a day file name. Week files and
-// anything else in the directory are rejected.
+// dayFileDate returns the date encoded in a day file name. Anything else in
+// the directory, including the week files older versions wrote, is rejected.
 func dayFileDate(name string) (string, bool) {
 	base, ok := strings.CutSuffix(name, ".json")
 	if !ok || parseDate(base).IsZero() {
@@ -207,74 +135,87 @@ func dayFileDate(name string) (string, bool) {
 	return base, true
 }
 
-func (s *Store) weekPath(start string) string {
-	return filepath.Join(s.dir, weekFilePrefix+start+".json")
+// Report loads the days of a calendar week and totals them up.
+func (s *Store) Report(week Week, now time.Time) (WeekReport, error) {
+	days, err := s.Days(week.Start, week.End)
+	if err != nil {
+		return WeekReport{}, err
+	}
+	return NewWeekReport(week, days, now), nil
 }
 
-const weekFilePrefix = "week-"
+// CurrentWeek reports the calendar week t falls in.
+func (s *Store) CurrentWeek(now time.Time) (WeekReport, error) {
+	return s.Report(WeekOf(now), now)
+}
 
-// Weeks returns every recorded week ordered by start date.
-func (s *Store) Weeks() ([]*Week, error) {
-	entries, err := os.ReadDir(s.dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
+// History returns a report per calendar week that has days on record, oldest
+// first. The ISO since and until dates limit it to the days between them, both
+// included; either may be empty for no limit on that end. A week reaching past
+// either one is reported with the days that are left of it.
+func (s *Store) History(now time.Time, since, until string) ([]WeekReport, error) {
+	days, err := s.Days(since, until)
 	if err != nil {
-		return nil, fmt.Errorf("read data directory %s: %w", s.dir, err)
+		return nil, err
 	}
 
-	var weeks []*Week
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, weekFilePrefix) || !strings.HasSuffix(name, ".json") {
+	// Days arrive in chronological order, so a day either belongs to the week
+	// the one before it did or opens the next one.
+	var reports []WeekReport
+	for _, day := range days {
+		week := WeekOf(day.CalendarDate())
+		if n := len(reports); n > 0 && reports[n-1].Week == week {
+			reports[n-1].Days = append(reports[n-1].Days, day)
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(s.dir, name))
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", name, err)
-		}
-		var week Week
-		if err := json.Unmarshal(data, &week); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", name, err)
-		}
-		if err := week.Validate(); err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
-		}
-		weeks = append(weeks, &week)
+		reports = append(reports, WeekReport{Week: week, Days: []*Day{day}})
 	}
-	sort.Slice(weeks, func(i, j int) bool { return weeks[i].Start < weeks[j].Start })
-	return weeks, nil
+	for i, r := range reports {
+		reports[i] = NewWeekReport(r.Week, r.Days, now)
+	}
+	return reports, nil
 }
 
-// ActiveWeek returns the running week, or nil when none is active.
-func (s *Store) ActiveWeek() (*Week, error) {
-	weeks, err := s.Weeks()
+// gapLookback is how far back GapBefore looks for the last day on record.
+// Coming back from a longer absence than this is not worth being reminded of.
+const gapLookback = 31
+
+// Gap is the stretch between the last day on record and the day being started.
+type Gap struct {
+	// Since is the last day that has anything recorded on it.
+	Since time.Time
+	// Weekdays are the days in between, weekends left out, that have nothing
+	// recorded on them: the ones that were presumably worked but never logged.
+	Weekdays []time.Time
+}
+
+// Empty reports whether nothing was skipped, which is also what a first ever
+// day looks like.
+func (g Gap) Empty() bool { return len(g.Weekdays) == 0 }
+
+// GapBefore returns the weekdays between the last day on record and t, both
+// excluded, that have nothing recorded on them. Anything already recorded on
+// t itself is the day being started, not a gap.
+func (s *Store) GapBefore(t time.Time) (Gap, error) {
+	today := t.Format(DateLayout)
+	days, err := s.Days(t.AddDate(0, 0, -gapLookback).Format(DateLayout), today)
 	if err != nil {
-		return nil, err
+		return Gap{}, err
 	}
-	for i := len(weeks) - 1; i >= 0; i-- {
-		if weeks[i].Active() {
-			return weeks[i], nil
+	for len(days) > 0 && days[len(days)-1].Date >= today {
+		days = days[:len(days)-1]
+	}
+	if len(days) == 0 {
+		return Gap{}, nil
+	}
+
+	gap := Gap{Since: days[len(days)-1].CalendarDate()}
+	for day := gap.Since.AddDate(0, 0, 1); day.Format(DateLayout) < today; day = day.AddDate(0, 0, 1) {
+		if !isWeekend(day) {
+			gap.Weekdays = append(gap.Weekdays, day)
 		}
 	}
-	return nil, nil
-}
-
-// LastWeek returns the most recently started week, or nil when there is none.
-func (s *Store) LastWeek() (*Week, error) {
-	weeks, err := s.Weeks()
-	if err != nil || len(weeks) == 0 {
-		return nil, err
-	}
-	return weeks[len(weeks)-1], nil
-}
-
-// SaveWeek writes the week atomically.
-func (s *Store) SaveWeek(week *Week) error {
-	if err := week.Validate(); err != nil {
-		return err
-	}
-	return s.write(s.weekPath(week.Start), week)
+	return gap, nil
 }
 
 // write serialises v as JSON and replaces path with it atomically.

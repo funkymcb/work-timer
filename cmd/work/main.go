@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/funkymcb/work-timer/internal/worklog"
@@ -22,9 +23,7 @@ Usage:
   work stop         end the working day
   work status       show what the timer is doing right now
 
-  work week start   open a work week
-  work week         show the days and hours of the open work week
-  work week end     close the work week and print its total
+  work week         show the days and hours of this calendar week
 
   work history      list every record, down to single sessions and breaks
   work where        print the path of the work log directory
@@ -43,10 +42,11 @@ first) - the separator says which part comes first.
 --at only moves an entry backwards, to the most recent time of day that has
 already passed, and never before the previous entry.
 
-A work week has to be open before the day can be started, and it can cover at
-most 5 working days.
+Weeks run Monday to Sunday and are worked out from the days on record, so
+there is no week to open or close. Starting a day points out the weekdays
+since your last record that have nothing logged on them.
 
-Data is stored as one JSON file per day plus one per week in $WORK_TIMER_DIR,
+Data is stored as one JSON file per day in $WORK_TIMER_DIR,
 $XDG_DATA_HOME/work-timer or the default data directory.
 `
 
@@ -102,11 +102,14 @@ func timerCommand(cmd string, store *worklog.Store, now time.Time, out io.Writer
 	case "start":
 		return start(store, at, now, out)
 	case "pause":
-		return mutate(store, at, now, out, (*worklog.Day).Pause, reportPause)
+		_, err := mutate(store, at, now, out, (*worklog.Day).Pause, reportPause)
+		return err
 	case "resume":
-		return mutate(store, at, now, out, (*worklog.Day).Resume, reportResume)
+		_, err := mutate(store, at, now, out, (*worklog.Day).Resume, reportResume)
+		return err
 	default: // stop, the only other command routed here
-		return mutate(store, at, now, out, (*worklog.Day).Stop, reportStop)
+		_, err := mutate(store, at, now, out, (*worklog.Day).Stop, reportStop)
+		return err
 	}
 }
 
@@ -155,174 +158,94 @@ func parseAt(value string, now time.Time) (time.Time, error) {
 }
 
 // mutate loads the current day, applies a state transition at the given time,
-// saves the result and prints a report of what happened. Totals in that report
-// are computed at now, so a backdated entry still shows where the day stands.
+// saves the result, prints a report of what happened and returns the day it
+// changed. Totals in that report are computed at now, so a backdated entry
+// still shows where the day stands.
 func mutate(
 	store *worklog.Store,
 	at, now time.Time,
 	out io.Writer,
 	apply func(*worklog.Day, time.Time) error,
 	report func(io.Writer, *worklog.Day, time.Time, time.Time),
-) error {
+) (*worklog.Day, error) {
 	day, err := store.Current(now)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := apply(day, at); err != nil {
-		return hint(err, day, at, now)
+		return nil, hint(err, day, at, now)
 	}
 	if err := store.Save(day); err != nil {
-		return err
+		return nil, err
 	}
 	report(out, day, at, now)
-	return nil
+	return day, nil
 }
 
-// start begins the working day. Hours may only be logged inside an open work
-// week, and only while that week has room for another working day.
+// start begins the working day and, for the first session of a day, points out
+// the weekdays since the last record that have nothing logged on them.
 func start(store *worklog.Store, at, now time.Time, out io.Writer) error {
-	active, err := store.ActiveWeek()
+	// Read the gap before the new session lands, or today would close it.
+	gap, err := store.GapBefore(at)
 	if err != nil {
 		return err
 	}
-	if active == nil {
-		return fmt.Errorf("%w - run `work week start` first", worklog.ErrNoActiveWeek)
-	}
-	report, err := store.Report(active, now)
+	day, err := mutate(store, at, now, out, (*worklog.Day).Start, reportStart)
 	if err != nil {
 		return err
 	}
-	// A second session on a day that already counts is always fine; only a
-	// new calendar day can push the week over the limit.
-	if report.Full() && !report.HasDay(at) {
-		return fmt.Errorf("%w - the one that started %s is full, run `work week end` and open a new one",
-			worklog.ErrWeekFull, dateLabel(active.StartDate()))
+	if len(day.Sessions) == 1 {
+		printGap(out, gap)
 	}
-	return mutate(store, at, now, out, (*worklog.Day).Start, reportStart)
-}
-
-// week dispatches the `work week ...` subcommands.
-func week(store *worklog.Store, now time.Time, out io.Writer, args []string) error {
-	sub := "status"
-	if len(args) > 0 {
-		sub = args[0]
-	}
-	switch sub {
-	case "start":
-		return weekStart(store, now, out)
-	case "end":
-		return weekEnd(store, now, out)
-	case "status":
-		return weekStatus(store, now, out)
-	default:
-		return fmt.Errorf("unknown command `work week %s` (try `work week`, `work week start` or `work week end`)", sub)
-	}
-}
-
-func weekStart(store *worklog.Store, now time.Time, out io.Writer) error {
-	active, err := store.ActiveWeek()
-	if err != nil {
-		return err
-	}
-	if active != nil {
-		report, err := store.Report(active, now)
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("%w (since %s, %d of %d working days used) - run `work week end` to close it",
-			worklog.ErrWeekActive, dateLabel(active.StartDate()), report.WorkDays(), worklog.MaxWorkDays)
-	}
-	// Two weeks must not lay claim to the same working day, or today's hours
-	// would be counted in both.
-	last, err := store.LastWeek()
-	if err != nil {
-		return err
-	}
-	if last != nil {
-		report, err := store.Report(last, now)
-		if err != nil {
-			return err
-		}
-		if report.HasDay(now) {
-			return fmt.Errorf("today's hours already belong to the work week that ended %s - a new week can start tomorrow",
-				dateLabel(last.EndDate()))
-		}
-	}
-
-	opened := worklog.NewWeek(now)
-	if err := store.SaveWeek(opened); err != nil {
-		return err
-	}
-	fmt.Fprintf(out, iconPlay+" Work week opened on %s.\n", dateLabel(opened.StartDate()))
-	fmt.Fprintf(out, "  Room for %d working days. Run `work start` to begin the day.\n", worklog.MaxWorkDays)
 	return nil
 }
 
-func weekEnd(store *worklog.Store, now time.Time, out io.Writer) error {
-	active, err := store.ActiveWeek()
-	if err != nil {
-		return err
+// printGap names the weekdays that were skipped, listing them while there are
+// few enough to read and, past that, counting them off the last day on record.
+func printGap(out io.Writer, gap worklog.Gap) {
+	switch n := len(gap.Weekdays); {
+	case gap.Empty():
+		return
+	case n <= 3:
+		labels := make([]string, 0, n)
+		for _, day := range gap.Weekdays {
+			labels = append(labels, dateLabel(day))
+		}
+		fmt.Fprintf(out, "  Nothing logged on %s.\n", join(labels))
+	default:
+		fmt.Fprintf(out, "  Nothing logged on the %d weekdays since %s.\n", n, dateLabel(gap.Since))
 	}
-	if active == nil {
-		return fmt.Errorf("%w - run `work week start` to open one", worklog.ErrNoActiveWeek)
+}
+
+// join lists names the way a sentence would, e.g. "Mon 14, Tue 15 and Wed 16".
+func join(labels []string) string {
+	switch len(labels) {
+	case 1:
+		return labels[0]
+	default:
+		return strings.Join(labels[:len(labels)-1], ", ") + " and " + labels[len(labels)-1]
 	}
-	// Closing the week under a running day would leave that day stranded
-	// outside any week, so make the day be stopped first.
-	day, err := store.Current(now)
-	if err != nil {
-		return err
-	}
-	if state := day.State(); state != worklog.Idle {
-		return fmt.Errorf("you are still %s (since %s) - run `work stop` first",
-			state, clock(day.LastActivity()))
+}
+
+// week shows the calendar week that is running. It still answers the `start`
+// and `end` subcommands of the days when weeks were opened by hand, because
+// they are what the fingers remember.
+func week(store *worklog.Store, now time.Time, out io.Writer, args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "start", "end":
+			return fmt.Errorf("`work week %s` is gone - weeks now run Monday to Sunday and are worked out from your day records, so just run `work start`", args[0])
+		case "status":
+		default:
+			return fmt.Errorf("unknown command `work week %s` (try `work week`)", args[0])
+		}
 	}
 
-	// The week ends on its last working day rather than on whatever day it is
-	// being closed on, so that closing a Mon-Fri week on Sunday evening does
-	// not stretch it over the weekend and block the next week from starting.
-	report, err := store.Report(active, now)
+	report, err := store.CurrentWeek(now)
 	if err != nil {
-		return err
-	}
-	end := now
-	if n := report.WorkDays(); n > 0 {
-		end = report.Days[n-1].CalendarDate()
-	}
-	if err := active.Close(end); err != nil {
-		return err
-	}
-	if err := store.SaveWeek(active); err != nil {
 		return err
 	}
 	printWeek(out, report, now, weekLayout{})
-	return nil
-}
-
-func weekStatus(store *worklog.Store, now time.Time, out io.Writer) error {
-	active, err := store.ActiveWeek()
-	if err != nil {
-		return err
-	}
-	if active != nil {
-		report, err := store.Report(active, now)
-		if err != nil {
-			return err
-		}
-		printWeek(out, report, now, weekLayout{})
-		return nil
-	}
-
-	fmt.Fprintln(out, iconStop+" No work week is open. Run `work week start` to open one.")
-	last, err := store.LastWeek()
-	if err != nil || last == nil {
-		return err
-	}
-	report, err := store.Report(last, now)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "  Last one: %s · %s over %s\n",
-		span(report), duration(report.Worked), plural(report.WorkDays(), "day"))
 	return nil
 }
 
@@ -339,11 +262,11 @@ type weekLayout struct {
 // clip names the ends the history range cuts a week off at, for the week
 // header, and is empty for a week that is shown whole. Its days and totals
 // cover only what is listed, so a week that loses days has to say so.
-func (l weekLayout) clip(week *worklog.Week, now time.Time) string {
-	// A running week reaches up to today, which is as far as its days are
-	// ever read.
+func (l weekLayout) clip(week worklog.Week, now time.Time) string {
+	// The week that is running reaches no further than today, so a cutoff
+	// after today leaves nothing of it out.
 	end := week.End
-	if week.Active() {
+	if week.Current(now) && isoDate(now) < end {
 		end = isoDate(now)
 	}
 	head := !l.from.IsZero() && week.Start < isoDate(l.from)
@@ -366,13 +289,13 @@ func printWeek(out io.Writer, report worklog.WeekReport, now time.Time, layout w
 	detail := layout.detail
 	clip := layout.clip(report.Week, now)
 
-	if report.Week.Active() {
-		fmt.Fprintf(out, iconPlay+" Work week since %s · %d of %d working days used%s\n",
-			dateLabel(report.Week.StartDate()), report.WorkDays(), worklog.MaxWorkDays, clip)
-	} else {
-		fmt.Fprintf(out, iconStop+" Work week %s · %s%s\n",
-			span(report), plural(report.WorkDays(), "working day"), clip)
+	icon := iconStop
+	if report.Week.Current(now) {
+		icon = iconPlay
 	}
+	fmt.Fprintf(out, "%s Week %s · %s%s%s\n",
+		icon, span(report), weekdayCount(report), weekendNote(report), clip)
+
 	if report.WorkDays() == 0 {
 		fmt.Fprintln(out, "  Nothing logged yet. Run `work start` to begin the day.")
 		return
@@ -455,19 +378,19 @@ func history(store *worklog.Store, now time.Time, out io.Writer, args []string) 
 			fullDateLabel(until), fullDateLabel(since))
 	}
 
-	weeks, loose, err := store.History(now, isoDate(since), isoDate(until))
+	weeks, err := store.History(now, isoDate(since), isoDate(until))
 	if err != nil {
 		return err
 	}
 
 	switch *format {
 	case "text":
-		printHistory(out, store.Dir(), weeks, loose, since, until, now)
+		printHistory(out, store.Dir(), weeks, since, until, now)
 		return nil
 	case "json":
-		return writeJSON(out, newHistoryView(weeks, loose, since, until, now))
+		return writeJSON(out, newHistoryView(weeks, since, until, now))
 	case "yaml":
-		return writeYAML(out, newHistoryView(weeks, loose, since, until, now))
+		return writeYAML(out, newHistoryView(weeks, since, until, now))
 	default:
 		return fmt.Errorf("unknown output %q (use text, json or yaml)", *format)
 	}
@@ -517,32 +440,27 @@ func isoDate(t time.Time) string {
 	return t.Format(worklog.DateLayout)
 }
 
-// historyTotals sums up everything on record, weeks and loose days alike.
-func historyTotals(weeks []worklog.WeekReport, loose []*worklog.Day, now time.Time) (days int, worked, breaks time.Duration) {
+// historyTotals sums up every week on record.
+func historyTotals(weeks []worklog.WeekReport) (days int, worked, breaks time.Duration) {
 	for _, report := range weeks {
 		days += report.WorkDays()
 		worked += report.Worked
 		breaks += report.Breaks
 	}
-	for _, d := range loose {
-		days++
-		worked += d.Worked(now)
-		breaks += d.BreakTime(now)
-	}
 	return days, worked, breaks
 }
 
 // printHistory writes the history as text: each week broken down into days,
-// sessions and breaks, the days no week covers, and the totals over all of it.
-// The range it was limited to is reported in the closing line, because the
-// weeks it cuts through are then listed with fewer days than they really hold.
-func printHistory(out io.Writer, dir string, weeks []worklog.WeekReport, loose []*worklog.Day, since, until, now time.Time) {
-	if len(weeks) == 0 && len(loose) == 0 {
+// sessions and breaks, and the totals over all of it. The range it was limited
+// to is reported in the closing line, because the weeks it cuts through are
+// then listed with fewer days than they really hold.
+func printHistory(out io.Writer, dir string, weeks []worklog.WeekReport, since, until, now time.Time) {
+	if len(weeks) == 0 {
 		if !since.IsZero() || !until.IsZero() {
 			fmt.Fprintf(out, "Nothing recorded %s.\n", rangePhrase(since, until))
 			return
 		}
-		fmt.Fprintf(out, "Nothing recorded in %s yet. Run `work week start` to open a week.\n", dir)
+		fmt.Fprintf(out, "Nothing recorded in %s yet. Run `work start` to begin the day.\n", dir)
 		return
 	}
 
@@ -553,17 +471,7 @@ func printHistory(out io.Writer, dir string, weeks []worklog.WeekReport, loose [
 		printWeek(out, report, now, weekLayout{detail: true, from: since, until: until})
 	}
 
-	if len(loose) > 0 {
-		if len(weeks) > 0 {
-			fmt.Fprintln(out)
-		}
-		fmt.Fprintf(out, iconStop+" Outside any work week · %s\n\n", plural(len(loose), "day"))
-		for _, d := range loose {
-			printDay(out, d, now, true)
-		}
-	}
-
-	days, worked, breaks := historyTotals(weeks, loose, now)
+	days, worked, breaks := historyTotals(weeks)
 
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "%s · %s · %s · %s worked · %s on breaks\n",
@@ -611,17 +519,28 @@ func marker(d *worklog.Day) string {
 	}
 }
 
-// span renders the date range a week covers, e.g. "Mon 14 Sep - Fri 18 Sep".
+// span renders the range a week covers, e.g. "Mon 14 - Sun 20 Sep". The month
+// is only named once unless the week runs across one.
 func span(report worklog.WeekReport) string {
-	start := dateLabel(report.Week.StartDate())
-	switch {
-	case report.Week.Active():
-		return start + " - open"
-	case report.Week.Start == report.Week.End:
-		return start
-	default:
-		return start + " - " + dateLabel(report.Week.EndDate())
+	start, end := report.Week.StartDate(), report.Week.EndDate()
+	if start.Month() == end.Month() {
+		return start.Format("Mon 02") + " - " + dateLabel(end)
 	}
+	return dateLabel(start) + " - " + dateLabel(end)
+}
+
+// weekdayCount says how far through the five weekdays the week is.
+func weekdayCount(report worklog.WeekReport) string {
+	return fmt.Sprintf("%d of %d weekdays", report.Weekdays(), worklog.WeekdaysPerWeek)
+}
+
+// weekendNote is added only when there are weekend days to account for, which
+// the count of weekdays would otherwise leave unmentioned.
+func weekendNote(report worklog.WeekReport) string {
+	if n := report.WeekendDays(); n > 0 {
+		return " + " + plural(n, "weekend day")
+	}
+	return ""
 }
 
 func dateLabel(t time.Time) string { return t.Format("Mon 02 Jan") }
@@ -639,16 +558,15 @@ func plural(n int, unit string) string {
 
 // weekLine adds the running week total under the daily status.
 func weekLine(store *worklog.Store, now time.Time, out io.Writer) error {
-	active, err := store.ActiveWeek()
-	if err != nil || active == nil {
-		return err
-	}
-	report, err := store.Report(active, now)
+	report, err := store.CurrentWeek(now)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "  This week: %s over %d of %d days (since %s)\n",
-		duration(report.Worked), report.WorkDays(), worklog.MaxWorkDays, dateLabel(active.StartDate()))
+	if report.WorkDays() == 0 {
+		return nil
+	}
+	fmt.Fprintf(out, "  This week: %s over %s%s (%s)\n",
+		duration(report.Worked), weekdayCount(report), weekendNote(report), span(report))
 	return nil
 }
 

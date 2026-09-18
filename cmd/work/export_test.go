@@ -8,17 +8,17 @@ import (
 	"github.com/funkymcb/work-timer/internal/worklog"
 )
 
-// exportFixture records a running week with one day of two sessions - the
-// second still open - plus a day from before weeks were kept, and returns the
-// store together with the time the history is taken at.
+// exportFixture records a Tuesday of two sessions - the second still open -
+// plus a day in the week before it, and returns the store together with the
+// time the history is taken at.
 func exportFixture(t *testing.T) (*worklog.Store, time.Time) {
 	t.Helper()
 	store := worklog.NewStore(t.TempDir())
 
-	loose := worklog.NewDay(at(10, 0).AddDate(0, 0, -2))
-	mustDo(t, loose.Start(at(10, 0).AddDate(0, 0, -2)))
-	mustDo(t, loose.Stop(at(12, 10).AddDate(0, 0, -2)))
-	mustDo(t, store.Save(loose))
+	sunday := worklog.NewDay(at(10, 0).AddDate(0, 0, -2))
+	mustDo(t, sunday.Start(at(10, 0).AddDate(0, 0, -2)))
+	mustDo(t, sunday.Stop(at(12, 10).AddDate(0, 0, -2)))
+	mustDo(t, store.Save(sunday))
 
 	day := worklog.NewDay(at(8, 0))
 	mustDo(t, day.Start(at(8, 0)))
@@ -27,8 +27,6 @@ func exportFixture(t *testing.T) (*worklog.Store, time.Time) {
 	mustDo(t, day.Stop(at(12, 0)))
 	mustDo(t, day.Start(at(13, 0)))
 	mustDo(t, store.Save(day))
-
-	mustDo(t, store.SaveWeek(worklog.NewWeek(at(8, 0))))
 
 	return store, at(14, 0)
 }
@@ -46,8 +44,33 @@ func TestHistoryAsJSON(t *testing.T) {
 		`  "generated_at": "2026-03-10T14:00:00Z",`,
 		`  "weeks": [`,
 		`    {`,
-		`      "start": "2026-03-10",`,
-		`      "active": true,`,
+		`      "start": "2026-03-02",`,
+		`      "end": "2026-03-08",`,
+		`      "current": false,`,
+		`      "worked_minutes": 130,`,
+		`      "break_minutes": 0,`,
+		`      "days": [`,
+		`        {`,
+		`          "date": "2026-03-08",`,
+		`          "state": "idle",`,
+		`          "worked_minutes": 130,`,
+		`          "break_minutes": 0,`,
+		`          "sessions": [`,
+		`            {`,
+		`              "start": "2026-03-08T10:00:00Z",`,
+		`              "end": "2026-03-08T12:10:00Z",`,
+		`              "worked_minutes": 130,`,
+		`              "break_minutes": 0,`,
+		`              "breaks": []`,
+		`            }`,
+		`          ]`,
+		`        }`,
+		`      ]`,
+		`    },`,
+		`    {`,
+		`      "start": "2026-03-09",`,
+		`      "end": "2026-03-15",`,
+		`      "current": true,`,
 		`      "worked_minutes": 285,`,
 		`      "break_minutes": 15,`,
 		`      "days": [`,
@@ -81,25 +104,8 @@ func TestHistoryAsJSON(t *testing.T) {
 		`      ]`,
 		`    }`,
 		`  ],`,
-		`  "days_outside_weeks": [`,
-		`    {`,
-		`      "date": "2026-03-08",`,
-		`      "state": "idle",`,
-		`      "worked_minutes": 130,`,
-		`      "break_minutes": 0,`,
-		`      "sessions": [`,
-		`        {`,
-		`          "start": "2026-03-08T10:00:00Z",`,
-		`          "end": "2026-03-08T12:10:00Z",`,
-		`          "worked_minutes": 130,`,
-		`          "break_minutes": 0,`,
-		`          "breaks": []`,
-		`        }`,
-		`      ]`,
-		`    }`,
-		`  ],`,
 		`  "totals": {`,
-		`    "weeks": 1,`,
+		`    "weeks": 2,`,
 		`    "working_days": 2,`,
 		`    "worked_minutes": 415,`,
 		`    "break_minutes": 15`,
@@ -124,8 +130,25 @@ func TestHistoryAsYAML(t *testing.T) {
 	want := strings.Join([]string{
 		`generated_at: "2026-03-10T14:00:00Z"`,
 		`weeks:`,
-		`  - start: "2026-03-10"`,
-		`    active: true`,
+		`  - start: "2026-03-02"`,
+		`    end: "2026-03-08"`,
+		`    current: false`,
+		`    worked_minutes: 130`,
+		`    break_minutes: 0`,
+		`    days:`,
+		`      - date: "2026-03-08"`,
+		`        state: "idle"`,
+		`        worked_minutes: 130`,
+		`        break_minutes: 0`,
+		`        sessions:`,
+		`          - start: "2026-03-08T10:00:00Z"`,
+		`            end: "2026-03-08T12:10:00Z"`,
+		`            worked_minutes: 130`,
+		`            break_minutes: 0`,
+		`            breaks: []`,
+		`  - start: "2026-03-09"`,
+		`    end: "2026-03-15"`,
+		`    current: true`,
 		`    worked_minutes: 285`,
 		`    break_minutes: 15`,
 		`    days:`,
@@ -146,19 +169,8 @@ func TestHistoryAsYAML(t *testing.T) {
 		`            worked_minutes: 60`,
 		`            break_minutes: 0`,
 		`            breaks: []`,
-		`days_outside_weeks:`,
-		`  - date: "2026-03-08"`,
-		`    state: "idle"`,
-		`    worked_minutes: 130`,
-		`    break_minutes: 0`,
-		`    sessions:`,
-		`      - start: "2026-03-08T10:00:00Z"`,
-		`        end: "2026-03-08T12:10:00Z"`,
-		`        worked_minutes: 130`,
-		`        break_minutes: 0`,
-		`        breaks: []`,
 		`totals:`,
-		`  weeks: 1`,
+		`  weeks: 2`,
 		`  working_days: 2`,
 		`  worked_minutes: 415`,
 		`  break_minutes: 15`,
@@ -220,15 +232,16 @@ func keysOf(doc, quote string) []string {
 
 func TestHistorySinceLimitsEveryOutput(t *testing.T) {
 	store, now := exportFixture(t)
-	// The fixture holds a loose day on the 8th and a week day on the 10th.
+	// The fixture holds a Sunday on the 8th and a Tuesday on the 10th, which
+	// fall in two different calendar weeks.
 	const since = "10.03.2026"
 
 	var text strings.Builder
 	if err := history(store, now, &text, []string{"--since", since}); err != nil {
 		t.Fatalf("text: %v", err)
 	}
-	if strings.Contains(text.String(), "Outside any work week") {
-		t.Errorf("the loose day before the cutoff is still listed:\n%s", text.String())
+	if strings.Contains(text.String(), "Sun 08 Mar") {
+		t.Errorf("the day before the cutoff is still listed:\n%s", text.String())
 	}
 	// The closing line names the cutoff, because the weeks above it can be
 	// listed with fewer days than they really hold.
@@ -304,7 +317,7 @@ func TestMinutesTruncateLikeTheTextOutput(t *testing.T) {
 
 func TestHistoryUntilLimitsEveryOutput(t *testing.T) {
 	store, now := exportFixture(t)
-	// The fixture holds a loose day on the 8th and a week day on the 10th.
+	// The fixture holds a Sunday on the 8th and a Tuesday on the 10th.
 	const until = "03/08/2026" // month first: 8 March 2026
 
 	var text strings.Builder
@@ -314,7 +327,7 @@ func TestHistoryUntilLimitsEveryOutput(t *testing.T) {
 	if strings.Contains(text.String(), "2026-03-10") || strings.Contains(text.String(), "Tue 10 Mar") {
 		t.Errorf("the day after the cutoff is still listed:\n%s", text.String())
 	}
-	if want := "Up to Sun 08 Mar 2026 · 0 weeks · 1 working day · 2h 10m worked · 0m on breaks\n"; !strings.HasSuffix(text.String(), want) {
+	if want := "Up to Sun 08 Mar 2026 · 1 week · 1 working day · 2h 10m worked · 0m on breaks\n"; !strings.HasSuffix(text.String(), want) {
 		t.Errorf("history ends with:\n%s\nwant it to end with:\n%s", text.String(), want)
 	}
 
@@ -334,23 +347,19 @@ func TestHistoryRangeMarksBothEndsOfAWeek(t *testing.T) {
 	store := worklog.NewStore(t.TempDir())
 	now := at(19, 0).AddDate(0, 0, 3)
 
-	// A closed week of four days, Tuesday through Friday.
+	// Tuesday through Friday of one calendar week.
 	for offset := range 4 {
 		d := worklog.NewDay(at(8, 0).AddDate(0, 0, offset))
 		mustDo(t, d.Start(at(8, 0).AddDate(0, 0, offset)))
 		mustDo(t, d.Stop(at(16, 0).AddDate(0, 0, offset)))
 		mustDo(t, store.Save(d))
 	}
-	week := worklog.NewWeek(at(8, 0))
-	mustDo(t, week.Close(at(16, 0).AddDate(0, 0, 3)))
-	mustDo(t, store.SaveWeek(week))
-
 	var out strings.Builder
 	if err := history(store, now, &out, []string{"--since", "11.03.2026", "--until", "12.03.2026"}); err != nil {
 		t.Fatalf("history: %v", err)
 	}
 
-	head := "⏹ Work week Tue 10 Mar - Fri 13 Mar · 2 working days · from Wed 11 Mar to Thu 12 Mar\n"
+	head := "▶ Week Mon 09 - Sun 15 Mar · 2 of 5 weekdays · from Wed 11 Mar to Thu 12 Mar\n"
 	if !strings.HasPrefix(out.String(), head) {
 		t.Errorf("history starts with:\n%s\nwant it to start with:\n%s", out.String(), head)
 	}

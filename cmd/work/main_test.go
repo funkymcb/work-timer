@@ -206,11 +206,11 @@ func TestHistoryListsEverythingOnRecord(t *testing.T) {
 	// It is Wednesday evening; work is still running from the afternoon.
 	now := at(19, 30).AddDate(0, 0, 1)
 
-	// A day worked before any week was opened.
-	loose := worklog.NewDay(at(10, 0).AddDate(0, 0, -2))
-	mustDo(t, loose.Start(at(10, 0).AddDate(0, 0, -2)))
-	mustDo(t, loose.Stop(at(12, 10).AddDate(0, 0, -2)))
-	mustDo(t, store.Save(loose))
+	// The Sunday before, which falls in the week before this one.
+	sunday := worklog.NewDay(at(10, 0).AddDate(0, 0, -2))
+	mustDo(t, sunday.Start(at(10, 0).AddDate(0, 0, -2)))
+	mustDo(t, sunday.Stop(at(12, 10).AddDate(0, 0, -2)))
+	mustDo(t, store.Save(sunday))
 
 	// Tuesday: one session with a break in it.
 	tue := worklog.NewDay(at(8, 0))
@@ -227,15 +227,21 @@ func TestHistoryListsEverythingOnRecord(t *testing.T) {
 	mustDo(t, wed.Start(at(18, 0).AddDate(0, 0, 1)))
 	mustDo(t, store.Save(wed))
 
-	mustDo(t, store.SaveWeek(worklog.NewWeek(at(8, 0))))
-
 	var out strings.Builder
 	if err := history(store, now, &out, nil); err != nil {
 		t.Fatalf("history: %v", err)
 	}
 
 	want := strings.Join([]string{
-		"▶ Work week since Tue 10 Mar · 2 of 5 working days used",
+		"⏹ Week Mon 02 - Sun 08 Mar · 0 of 5 weekdays + 1 weekend day",
+		"",
+		"  Sun 08 Mar   2h 10m   breaks     0m",
+		"      ▶ 10:00 - 12:10     2h 10m",
+		"",
+		"  Total        2h 10m   breaks     0m",
+		"  Average      2h 10m",
+		"",
+		"▶ Week Mon 09 - Sun 15 Mar · 2 of 5 weekdays",
 		"",
 		"  Tue 10 Mar   8h 30m   breaks    30m",
 		"      ▶ 08:00 - 17:00     8h 30m",
@@ -247,12 +253,7 @@ func TestHistoryListsEverythingOnRecord(t *testing.T) {
 		"  Total       14h 00m   breaks    30m",
 		"  Average      7h 00m",
 		"",
-		"⏹ Outside any work week · 1 day",
-		"",
-		"  Sun 08 Mar   2h 10m   breaks     0m",
-		"      ▶ 10:00 - 12:10     2h 10m",
-		"",
-		"All time · 1 week · 3 working days · 16h 10m worked · 30m on breaks",
+		"All time · 2 weeks · 3 working days · 16h 10m worked · 30m on breaks",
 		"",
 	}, "\n")
 
@@ -271,24 +272,21 @@ func TestHistorySinceMarksAWeekItCutsThrough(t *testing.T) {
 		mustDo(t, d.Stop(at(16, 0).AddDate(0, 0, offset)))
 		mustDo(t, store.Save(d))
 	}
-	week := worklog.NewWeek(at(8, 0))
-	mustDo(t, week.Close(at(16, 0).AddDate(0, 0, 1)))
-	mustDo(t, store.SaveWeek(week))
-
 	// Cutting into the week hides its first day, so the header has to say
 	// that the days and totals below cover only part of it.
 	var cut strings.Builder
 	if err := history(store, now, &cut, []string{"--since", "11.03.2026"}); err != nil {
 		t.Fatalf("history: %v", err)
 	}
-	want := "⏹ Work week Tue 10 Mar - Wed 11 Mar · 1 working day · from Wed 11 Mar on\n"
+	want := "▶ Week Mon 09 - Sun 15 Mar · 1 of 5 weekdays · from Wed 11 Mar on\n"
 	if !strings.HasPrefix(cut.String(), want) {
 		t.Errorf("history starts with:\n%s\nwant it to start with:\n%s", cut.String(), want)
 	}
 
-	// A cutoff the week lies entirely after leaves it whole, and unmarked.
+	// A cutoff on the Monday the week starts on leaves it whole, and unmarked,
+	// even though nothing was logged that day.
 	var whole strings.Builder
-	if err := history(store, now, &whole, []string{"--since", "10.03.2026"}); err != nil {
+	if err := history(store, now, &whole, []string{"--since", "09.03.2026"}); err != nil {
 		t.Fatalf("history: %v", err)
 	}
 	if strings.Contains(whole.String(), " on\n") {
@@ -325,4 +323,106 @@ func TestCompactAndDuration(t *testing.T) {
 			t.Errorf("compact(%v) = %q, want %q", tc.in, got, tc.wantCompact)
 		}
 	}
+}
+
+func TestStartPointsOutTheDaysThatWereSkipped(t *testing.T) {
+	// at() sits on Tuesday 10 March 2026; the Friday before is the 6th.
+	friday := at(8, 0).AddDate(0, 0, -4)
+
+	tests := []struct {
+		name   string
+		logged []time.Time
+		start  time.Time
+		want   string
+	}{
+		{
+			name:   "back on tuesday with no monday",
+			logged: []time.Time{friday},
+			start:  at(8, 0),
+			want:   "  Nothing logged on Mon 09 Mar.\n",
+		},
+		{
+			// The weekend is not a gap, so nothing is said.
+			name:   "straight from friday to monday",
+			logged: []time.Time{friday},
+			start:  at(8, 0).AddDate(0, 0, -1),
+			want:   "",
+		},
+		{
+			name:   "two days off",
+			logged: []time.Time{friday},
+			start:  at(8, 0).AddDate(0, 0, 1),
+			want:   "  Nothing logged on Mon 09 Mar and Tue 10 Mar.\n",
+		},
+		{
+			name:   "a longer absence is summarised",
+			logged: []time.Time{friday},
+			start:  at(8, 0).AddDate(0, 0, 7),
+			want:   "  Nothing logged on the 6 weekdays since Fri 06 Mar.\n",
+		},
+		{
+			name:   "nothing on record yet",
+			logged: nil,
+			start:  at(8, 0),
+			want:   "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := worklog.NewStore(t.TempDir())
+			for _, when := range tc.logged {
+				d := worklog.NewDay(when)
+				mustDo(t, d.Start(when))
+				mustDo(t, d.Stop(when.Add(8*time.Hour)))
+				mustDo(t, store.Save(d))
+			}
+
+			var out strings.Builder
+			if err := start(store, tc.start, tc.start, &out); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+
+			got := out.String()
+			if tc.want == "" {
+				if strings.Contains(got, "Nothing logged") {
+					t.Errorf("start said something about a gap:\n%s", got)
+				}
+				return
+			}
+			if !strings.HasSuffix(got, tc.want) {
+				t.Errorf("start printed:\n%s\nwant it to end with:\n%s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStartStaysQuietOnASecondSessionOfTheSameDay(t *testing.T) {
+	store := worklog.NewStore(t.TempDir())
+	friday := at(8, 0).AddDate(0, 0, -4)
+	d := worklog.NewDay(friday)
+	mustDo(t, d.Start(friday))
+	mustDo(t, d.Stop(friday.Add(8*time.Hour)))
+	mustDo(t, store.Save(d))
+
+	// The morning session reports the skipped Monday.
+	var morning strings.Builder
+	mustDo(t, start(store, at(8, 0), at(8, 0), &morning))
+	if !strings.Contains(morning.String(), "Nothing logged on Mon 09 Mar.") {
+		t.Fatalf("the first session said nothing about the gap:\n%s", morning.String())
+	}
+	mustDo(t, mutateStop(store, at(12, 0)))
+
+	// Picking the day back up in the evening does not repeat it.
+	var evening strings.Builder
+	mustDo(t, start(store, at(18, 0), at(18, 0), &evening))
+	if strings.Contains(evening.String(), "Nothing logged") {
+		t.Errorf("the second session repeated the gap:\n%s", evening.String())
+	}
+}
+
+// mutateStop ends the running day, for tests that need a second session.
+func mutateStop(store *worklog.Store, at time.Time) error {
+	_, err := mutate(store, at, at, io.Discard, (*worklog.Day).Stop, reportStop)
+	return err
 }
