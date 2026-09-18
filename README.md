@@ -315,13 +315,13 @@ yesterday's session is still open, the commands keep operating on yesterday.
 
 ## tmux status bar
 
-`work status --format tmux` prints a single short line, and nothing at all when
-the day has not been started:
+`work status --format tmux` prints a single short line:
 
 ```
-▶ 4h18m     working, 4h18m worked so far
-⏸ 12m       on a break that started 12 minutes ago
-⏹ 8h36m     done for the day
+▶ 4h18m       working, 4h18m worked so far
+⏸ 12m         on a break that started 12 minutes ago
+⏹ 8h36m       done for the day
+⏹ no record   the day has not been started
 ```
 
 The symbols are `iconPlay`/`iconPause`/`iconStop` in `cmd/work/main.go`; swap

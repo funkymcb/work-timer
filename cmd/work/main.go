@@ -687,7 +687,7 @@ func textStatus(day *worklog.Day, now time.Time) string {
 // tmuxStatus is a compact line for the tmux status bar.
 func tmuxStatus(day *worklog.Day, now time.Time) string {
 	if !day.Started() {
-		return ""
+		return iconStop + " no record"
 	}
 	switch day.State() {
 	case worklog.Working:
