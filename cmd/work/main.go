@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/funkymcb/work-timer/internal/worklog"
 )
@@ -302,28 +303,98 @@ func printWeek(out io.Writer, report worklog.WeekReport, now time.Time, layout w
 	}
 
 	fmt.Fprintln(out)
+	fmt.Fprintln(out, tableRow(detail, "Day", "Entry", "Worked", "Breaks"))
+	fmt.Fprintln(out, tableRule(detail))
 	for _, d := range report.Days {
 		printDay(out, d, now, detail)
 	}
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  %-10s %8s   breaks %6s\n", "Total", duration(report.Worked), duration(report.Breaks))
-	fmt.Fprintf(out, "  %-10s %8s\n", "Average", duration(report.Average()))
+	fmt.Fprintln(out, tableRule(detail))
+	fmt.Fprintln(out, tableRow(detail, "Total", "", duration(report.Worked), duration(report.Breaks)))
+	fmt.Fprintln(out, tableRow(detail, "Average", "", duration(report.Average()), ""))
 }
 
-// printDay renders one line per day and, with detail, the sessions of that day
-// with their breaks nested underneath.
+// Column widths of the day table. The entry column carries an icon and a time
+// range, e.g. "▶ 08:12 - 17:24+1d", and is only shown in the detailed view.
+const (
+	colDay    = 12
+	colEntry  = 18
+	colWorked = 8
+	colBreaks = 7
+)
+
+// tableRow lays out one line of the day table. Cells that do not apply to a
+// row are passed empty and left blank, so the entries of a day sit under the
+// day they belong to without restating its figures. Separators are kept on
+// those blank cells, which holds the shape of the table down the entry rows,
+// and only the padding past the last one is dropped, so no line carries
+// trailing blanks.
+func tableRow(detail bool, day, entry, worked, breaks string) string {
+	cells := []string{padRight(day, colDay)}
+	if detail {
+		cells = append(cells, padRight(entry, colEntry))
+	}
+	cells = append(cells, padLeft(worked, colWorked), padLeft(breaks, colBreaks))
+	return strings.TrimRight("  "+strings.Join(cells, " │ "), " ")
+}
+
+// tableRule is the horizontal rule that separates the header and the totals
+// from the days between them.
+func tableRule(detail bool) string {
+	cells := []string{strings.Repeat("─", colDay)}
+	if detail {
+		cells = append(cells, strings.Repeat("─", colEntry))
+	}
+	cells = append(cells, strings.Repeat("─", colWorked), strings.Repeat("─", colBreaks))
+	return "  " + strings.Join(cells, "─┼─")
+}
+
+// padRight and padLeft pad a cell to its column width. They count runes rather
+// than bytes, because the icons of an entry cell are multi byte but single
+// width, and fmt would pad them by byte and pull the column out of line.
+func padRight(s string, width int) string { return s + strings.Repeat(" ", gap(s, width)) }
+
+func padLeft(s string, width int) string { return strings.Repeat(" ", gap(s, width)) + s }
+
+func gap(s string, width int) int {
+	if n := width - utf8.RuneCountInString(s); n > 0 {
+		return n
+	}
+	return 0
+}
+
+// printDay renders the totals of one day and, with detail, the entries behind
+// them. The first entry shares the row of its day, so a day of one session
+// states its times and its total on a single line rather than repeating the
+// same figures underneath themselves.
 func printDay(out io.Writer, d *worklog.Day, now time.Time, detail bool) {
-	fmt.Fprintf(out, "  %-10s %8s   breaks %6s%s\n",
-		dateLabel(d.CalendarDate()), duration(d.Worked(now)), duration(d.BreakTime(now)), marker(d))
-	if !detail {
+	label := dateLabel(d.CalendarDate())
+	worked, breaks := duration(d.Worked(now)), duration(d.BreakTime(now))
+
+	entries := dayEntries(d)
+	if !detail || len(entries) == 0 {
+		fmt.Fprintln(out, tableRow(detail, label, "", worked, breaks)+marker(d))
 		return
 	}
+
+	fmt.Fprintln(out, tableRow(detail, label, entries[0], worked, breaks)+marker(d))
+	for _, entry := range entries[1:] {
+		fmt.Fprintln(out, tableRow(detail, "", entry, "", ""))
+	}
+}
+
+// dayEntries flattens the sessions of a day, and the breaks nested in them,
+// into the lines of the entry column, in the order they were recorded. Only
+// the spans are listed: their durations are what the day totals add up, and
+// stating both next to each other is what made the listing hard to read.
+func dayEntries(d *worklog.Day) []string {
+	var entries []string
 	for _, s := range d.Sessions {
-		fmt.Fprintf(out, "      %s %-15s %8s\n", iconPlay, timeRange(s.Start, s.End), duration(s.Worked(now)))
+		entries = append(entries, iconPlay+" "+timeRange(s.Start, s.End))
 		for _, b := range s.Breaks {
-			fmt.Fprintf(out, "        %s %-13s %8s\n", iconPause, timeRange(b.Start, b.End), duration(b.Duration(now)))
+			entries = append(entries, iconPause+" "+timeRange(b.Start, b.End))
 		}
 	}
+	return entries
 }
 
 // timeRange renders the span of a session or break, e.g. "08:12 - 17:24". An
@@ -580,6 +651,10 @@ func hint(err error, day *worklog.Day, at, now time.Time) error {
 	case errors.Is(err, worklog.ErrOutOfOrder):
 		return fmt.Errorf("%w - %s is before %s, the day being recorded%s",
 			err, stamp(at, now), dateLabel(day.CalendarDate()), rolledBack(at, now))
+	case errors.Is(err, worklog.ErrAlreadyStarted) && day.State() == worklog.OnBreak:
+		b, _ := day.CurrentBreak()
+		return fmt.Errorf("%w (since %s, %s worked so far) and you are on a break since %s - run `work resume`",
+			err, clock(day.FirstStart()), duration(day.Worked(now)), clock(b.Start))
 	case errors.Is(err, worklog.ErrAlreadyStarted):
 		return fmt.Errorf("%w (since %s, %s worked so far)",
 			err, clock(day.FirstStart()), duration(day.Worked(now)))

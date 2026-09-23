@@ -235,23 +235,24 @@ func TestHistoryListsEverythingOnRecord(t *testing.T) {
 	want := strings.Join([]string{
 		"⏹ Week Mon 02 - Sun 08 Mar · 0 of 5 weekdays + 1 weekend day",
 		"",
-		"  Sun 08 Mar   2h 10m   breaks     0m",
-		"      ▶ 10:00 - 12:10     2h 10m",
-		"",
-		"  Total        2h 10m   breaks     0m",
-		"  Average      2h 10m",
+		"  Day          │ Entry              │   Worked │  Breaks",
+		"  ─────────────┼────────────────────┼──────────┼────────",
+		"  Sun 08 Mar   │ ▶ 10:00 - 12:10    │   2h 10m │      0m",
+		"  ─────────────┼────────────────────┼──────────┼────────",
+		"  Total        │                    │   2h 10m │      0m",
+		"  Average      │                    │   2h 10m │",
 		"",
 		"▶ Week Mon 09 - Sun 15 Mar · 2 of 5 weekdays",
 		"",
-		"  Tue 10 Mar   8h 30m   breaks    30m",
-		"      ▶ 08:00 - 17:00     8h 30m",
-		"        ⏸ 12:00 - 12:30      30m",
-		"  Wed 11 Mar   5h 30m   breaks     0m   ▶ now",
-		"      ▶ 08:00 - 12:00     4h 00m",
-		"      ▶ 18:00 - open      1h 30m",
-		"",
-		"  Total       14h 00m   breaks    30m",
-		"  Average      7h 00m",
+		"  Day          │ Entry              │   Worked │  Breaks",
+		"  ─────────────┼────────────────────┼──────────┼────────",
+		"  Tue 10 Mar   │ ▶ 08:00 - 17:00    │   8h 30m │     30m",
+		"               │ ⏸ 12:00 - 12:30    │          │",
+		"  Wed 11 Mar   │ ▶ 08:00 - 12:00    │   5h 30m │      0m   ▶ now",
+		"               │ ▶ 18:00 - open     │          │",
+		"  ─────────────┼────────────────────┼──────────┼────────",
+		"  Total        │                    │  14h 00m │     30m",
+		"  Average      │                    │   7h 00m │",
 		"",
 		"All time · 2 weeks · 3 working days · 16h 10m worked · 30m on breaks",
 		"",
@@ -421,8 +422,55 @@ func TestStartStaysQuietOnASecondSessionOfTheSameDay(t *testing.T) {
 	}
 }
 
+func TestStartOnABreakPointsAtResume(t *testing.T) {
+	tests := []struct {
+		name   string
+		pause  bool
+		want   string
+		unwant string
+	}{
+		{
+			name:   "while working",
+			want:   "work has already been started (since 08:00, 4h 00m worked so far)",
+			unwant: "work resume",
+		},
+		{
+			name:  "while on a break",
+			pause: true,
+			want:  "work has already been started (since 08:00, 3h 30m worked so far) and you are on a break since 11:30 - run `work resume`",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := worklog.NewStore(t.TempDir())
+			mustDo(t, start(store, at(8, 0), at(8, 0), io.Discard))
+			if tc.pause {
+				mustDo(t, mutatePause(store, at(11, 30)))
+			}
+
+			err := start(store, at(12, 0), at(12, 0), io.Discard)
+			if err == nil {
+				t.Fatal("start on a running day did not fail")
+			}
+			if got := err.Error(); got != tc.want {
+				t.Errorf("start said:\n%s\nwant:\n%s", got, tc.want)
+			}
+			if tc.unwant != "" && strings.Contains(err.Error(), tc.unwant) {
+				t.Errorf("start suggested %q while working:\n%s", tc.unwant, err)
+			}
+		})
+	}
+}
+
 // mutateStop ends the running day, for tests that need a second session.
 func mutateStop(store *worklog.Store, at time.Time) error {
 	_, err := mutate(store, at, at, io.Discard, (*worklog.Day).Stop, reportStop)
+	return err
+}
+
+// mutatePause starts a break, for tests that need the timer paused.
+func mutatePause(store *worklog.Store, at time.Time) error {
+	_, err := mutate(store, at, at, io.Discard, (*worklog.Day).Pause, reportPause)
 	return err
 }

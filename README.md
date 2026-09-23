@@ -86,12 +86,14 @@ forget, and `work start` never refuses.
 $ work week
 ▶ Week Mon 14 - Sun 20 Sep · 3 of 5 weekdays
 
-  Mon 14 Sep   8h 30m   breaks     0m
-  Tue 15 Sep   8h 50m   breaks     0m
-  Fri 18 Sep   8h 01m   breaks     0m   ▶ now
-
-  Total       25h 21m   breaks     0m
-  Average      8h 27m
+  Day          │   Worked │  Breaks
+  ─────────────┼──────────┼────────
+  Mon 14 Sep   │   8h 30m │      0m
+  Tue 15 Sep   │   8h 50m │      0m
+  Fri 18 Sep   │   8h 01m │      0m   ▶ now
+  ─────────────┼──────────┼────────
+  Total        │  25h 21m │      0m
+  Average      │   8h 27m │
 ```
 
 The count is of the five weekdays. A Saturday or Sunday still counts into the
@@ -138,43 +140,44 @@ inside it, and every session and break inside those days.
 $ work history
 ⏹ Week Mon 07 - Sun 13 Sep · 5 of 5 weekdays
 
-  Mon 07 Sep   8h 42m   breaks    30m
-      ▶ 08:12 - 17:24     8h 42m
-        ⏸ 12:30 - 13:00      30m
-  Tue 08 Sep   8h 15m   breaks    30m
-      ▶ 08:00 - 16:45     8h 15m
-        ⏸ 12:00 - 12:30      30m
+  Day          │ Entry              │   Worked │  Breaks
+  ─────────────┼────────────────────┼──────────┼────────
+  Mon 07 Sep   │ ▶ 08:12 - 17:24    │   8h 42m │     30m
+               │ ⏸ 12:30 - 13:00    │          │
+  Tue 08 Sep   │ ▶ 08:00 - 16:45    │   8h 15m │     30m
+               │ ⏸ 12:00 - 12:30    │          │
   ...
-
-  Total       39h 47m   breaks 2h 15m
-  Average      7h 57m
+  ─────────────┼────────────────────┼──────────┼────────
+  Total        │                    │  39h 47m │  2h 15m
+  Average      │                    │   7h 57m │
 
 ▶ Week Mon 14 - Sun 20 Sep · 2 of 5 weekdays
 
-  Thu 17 Sep   8h 17m   breaks    40m
-      ▶ 08:15 - 17:12     8h 17m
-        ⏸ 12:00 - 12:40      40m
-  Fri 18 Sep   5h 10m   breaks    54m   ⏸ on break
-      ▶ 08:05 - 12:00     3h 40m
-        ⏸ 09:30 - 09:45      15m
-      ▶ 13:00 - open      1h 30m
-        ⏸ 14:30 - open       39m
-
-  Total       13h 27m   breaks 1h 34m
-  Average      6h 43m
+  Day          │ Entry              │   Worked │  Breaks
+  ─────────────┼────────────────────┼──────────┼────────
+  Thu 17 Sep   │ ▶ 08:15 - 17:12    │   8h 17m │     40m
+               │ ⏸ 12:00 - 12:40    │          │
+  Fri 18 Sep   │ ▶ 08:05 - 12:00    │   5h 10m │     54m   ⏸ on break
+               │ ⏸ 09:30 - 09:45    │          │
+               │ ▶ 13:00 - open     │          │
+               │ ⏸ 14:30 - open     │          │
+  ─────────────┼────────────────────┼──────────┼────────
+  Total        │                    │  13h 27m │  1h 34m
+  Average      │                    │   6h 43m │
 
 All time · 2 weeks · 7 working days · 53h 14m worked · 3h 49m on breaks
 ```
 
-Each `▶` line is one session with its net worked time, and the `⏸` lines under
-it are the breaks taken during that session. An entry still running reads
-`- open`, and one that ended on a later date carries the offset
-(`21:00 - 01:30+1d`), so a shift over midnight is never mistaken for a session
-that ran backwards.
+Each `▶` entry is one session, and the `⏸` entries under it are the breaks
+taken during it. The figures belong to the day, not to the entry beside them:
+they are stated once, on the row the day starts on, and the entries below it
+carry only their times. An entry still running reads `- open`, and one that
+ended on a later date carries the offset (`21:00 - 01:30+1d`), so a shift over
+midnight is never mistaken for a session that ran backwards.
 
 Every day belongs to exactly one calendar week, so nothing falls outside the
-listing. The output is a plain list; pipe it through `less` once there is a lot
-of it.
+listing. The table is plain text, one week after another; pipe it through
+`less` once there is a lot of it.
 
 ### Only part of it
 
@@ -185,17 +188,17 @@ dates included. Either can stand on its own:
 $ work history --since 15.09.2026
 ▶ Week Mon 14 - Sun 20 Sep · 2 of 5 weekdays · from Tue 15 Sep on
 
-  Thu 17 Sep   8h 17m   breaks    40m
-      ▶ 08:15 - 17:12     8h 17m
-        ⏸ 12:00 - 12:40      40m
-  Fri 18 Sep   5h 10m   breaks    54m   ⏸ on break
-      ▶ 08:05 - 12:00     3h 40m
-        ⏸ 09:30 - 09:45      15m
-      ▶ 13:00 - open      1h 30m
-        ⏸ 14:30 - open       39m
-
-  Total       13h 27m   breaks 1h 34m
-  Average      6h 43m
+  Day          │ Entry              │   Worked │  Breaks
+  ─────────────┼────────────────────┼──────────┼────────
+  Thu 17 Sep   │ ▶ 08:15 - 17:12    │   8h 17m │     40m
+               │ ⏸ 12:00 - 12:40    │          │
+  Fri 18 Sep   │ ▶ 08:05 - 12:00    │   5h 10m │     54m   ⏸ on break
+               │ ⏸ 09:30 - 09:45    │          │
+               │ ▶ 13:00 - open     │          │
+               │ ⏸ 14:30 - open     │          │
+  ─────────────┼────────────────────┼──────────┼────────
+  Total        │                    │  13h 27m │  1h 34m
+  Average      │                    │   6h 43m │
 
 Since Tue 15 Sep 2026 · 1 week · 2 working days · 13h 27m worked · 1h 34m on breaks
 ```
