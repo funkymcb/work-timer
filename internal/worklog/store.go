@@ -176,6 +176,69 @@ func (s *Store) History(now time.Time, since, until string) ([]WeekReport, error
 	return reports, nil
 }
 
+// configFile is the name of the settings file in the data directory. It is not
+// an ISO date, so the day listing passes over it.
+const configFile = "config.json"
+
+// Config reads the settings. A work log that was never configured, like one
+// written by an older version, runs on the defaults rather than failing.
+func (s *Store) Config() (Config, error) {
+	data, err := os.ReadFile(filepath.Join(s.dir, configFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return DefaultConfig(), nil
+	}
+	if err != nil {
+		return Config{}, fmt.Errorf("read %s: %w", configFile, err)
+	}
+	config := DefaultConfig()
+	if err := json.Unmarshal(data, &config); err != nil {
+		return Config{}, fmt.Errorf("parse %s: %w", configFile, err)
+	}
+	return config, nil
+}
+
+// SaveConfig writes the settings atomically.
+func (s *Store) SaveConfig(config Config) error {
+	return s.write(filepath.Join(s.dir, configFile), config)
+}
+
+// Overtime totals the hours worked against the hours owed, a contracted week
+// for every finished week that has anything on record, less whatever has been
+// taken out of the balance.
+//
+// The week that is running is left out: it is only ever part worked, so
+// counting it would show the whole of it as owed on a Monday morning and walk
+// the balance back up over the week. `work status` reports it on its own line
+// instead, and it joins the balance once it is over.
+//
+// Weeks with nothing logged at all are left out too: they are the holidays,
+// the sick days and the stretch before this tool was picked up, none of which
+// are hours that went missing. A week that is only half logged is still
+// measured against the whole contracted week, so a day off inside a working
+// week does read as a shortfall until it is taken out of the balance.
+func (s *Store) Overtime(config Config, now time.Time) (OvertimeReport, error) {
+	// Up to the Sunday before the week that is running.
+	until := WeekOf(now).StartDate().AddDate(0, 0, -1).Format(DateLayout)
+	weeks, err := s.History(now, config.OvertimeSince, until)
+	if err != nil {
+		return OvertimeReport{}, err
+	}
+
+	report := OvertimeReport{
+		Since: config.OvertimeSince,
+		Weeks: len(weeks),
+		Used:  config.Used(),
+	}
+	for _, week := range weeks {
+		report.Worked += week.Worked
+		report.Target += config.WeeklyTarget()
+	}
+	if len(weeks) > 0 {
+		report.First, report.Last = weeks[0].Week, weeks[len(weeks)-1].Week
+	}
+	return report, nil
+}
+
 // gapLookback is how far back GapBefore looks for the last day on record.
 // Coming back from a longer absence than this is not worth being reminded of.
 const gapLookback = 31

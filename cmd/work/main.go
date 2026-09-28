@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,6 +28,10 @@ Usage:
 
   work week         show the days and hours of this calendar week
 
+  work hours        show the contracted hours per week
+  work hours 37.5   set the contracted hours per week (default 40)
+  work overtime     show the overtime balance and what it is made of
+
   work history      list every record, down to single sessions and breaks
   work where        print the path of the work log directory
 
@@ -33,6 +39,9 @@ Flags:
   work start|pause|resume|stop [--at HH:MM]   record the entry at that time
                                               instead of now (default now)
   work status [--format text|tmux]            output format (default text)
+  work overtime [--reset]                     set the balance back to zero
+  work overtime [--use-up HOURS]              take hours out of the balance,
+                                              e.g. --use-up 8 for a day off
   work history [--out text|json|yaml]         output format (default text)
   work history [--since DATE] [--until DATE]  only the days in that range,
                                               both dates included
@@ -46,6 +55,13 @@ already passed, and never before the previous entry.
 Weeks run Monday to Sunday and are worked out from the days on record, so
 there is no week to open or close. Starting a day points out the weekdays
 since your last record that have nothing logged on them.
+
+Overtime is the hours worked against a contracted week for every finished
+week that has anything on record. The week that is running is left out until
+it is over; work status reports it on its own line. Weeks with nothing
+logged at all - holidays, sick leave, the time before you started - are left
+out for good. --reset counts again from the Monday of this week, dropping the
+withdrawals along with the balance they came out of.
 
 Data is stored as one JSON file per day in $WORK_TIMER_DIR,
 $XDG_DATA_HOME/work-timer or the default data directory.
@@ -81,6 +97,10 @@ func run(args []string, out io.Writer) error {
 		return status(store, now, out, rest)
 	case "history":
 		return history(store, now, out, rest)
+	case "hours":
+		return contract(store, out, rest)
+	case "overtime":
+		return overtime(store, now, out, rest)
 	case "where":
 		fmt.Fprintln(out, store.Dir())
 		return nil
@@ -627,18 +647,41 @@ func plural(n int, unit string) string {
 	return fmt.Sprintf("%d %ss", n, unit)
 }
 
-// weekLine adds the running week total under the daily status.
-func weekLine(store *worklog.Store, now time.Time, out io.Writer) error {
-	report, err := store.CurrentWeek(now)
+// weekLine adds the running week, measured against the contracted hours, and
+// the overtime balance under the daily status. Either line is left out when it
+// has nothing to say: a week that has not been worked yet, or a balance with
+// no finished week and no withdrawal behind it. The week that is running is on
+// the first line and not in the balance, so neither line counts it twice.
+func weekLine(store *worklog.Store, config worklog.Config, now time.Time, out io.Writer) error {
+	week, err := store.CurrentWeek(now)
 	if err != nil {
 		return err
 	}
-	if report.WorkDays() == 0 {
+	if week.WorkDays() > 0 {
+		fmt.Fprintf(out, "  This week: %s / %s over %s%s (%s)\n",
+			duration(week.Worked), target(config.WeeklyTarget()),
+			weekdayCount(week), weekendNote(week), span(week))
+	}
+
+	report, err := store.Overtime(config, now)
+	if err != nil {
+		return err
+	}
+	if report.Empty() {
 		return nil
 	}
-	fmt.Fprintf(out, "  This week: %s over %s%s (%s)\n",
-		duration(report.Worked), weekdayCount(report), weekendNote(report), span(report))
+	fmt.Fprintf(out, "  Overtime:  %s over %s%s\n",
+		balance(report.Balance()), plural(report.Weeks, "week"), countedSince(report))
 	return nil
+}
+
+// countedSince names the reset the balance is counted from, and is empty while
+// it still covers everything on record.
+func countedSince(report worklog.OvertimeReport) string {
+	if report.Since == "" {
+		return ""
+	}
+	return " (since " + dateLabel(report.SinceDate()) + ")"
 }
 
 // hint turns a state transition error into a message that says what the timer
@@ -722,6 +765,14 @@ func status(store *worklog.Store, now time.Time, out io.Writer, args []string) e
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q for `work status`", fs.Arg(0))
+	}
+
+	config, err := store.Config()
+	if err != nil {
+		return err
+	}
 
 	day, err := store.Current(now)
 	if err != nil {
@@ -734,10 +785,192 @@ func status(store *worklog.Store, now time.Time, out io.Writer, args []string) e
 		return nil
 	case "text":
 		fmt.Fprintln(out, textStatus(day, now))
-		return weekLine(store, now, out)
+		return weekLine(store, config, now, out)
 	default:
 		return fmt.Errorf("unknown format %q (use text or tmux)", *format)
 	}
+}
+
+// overtime reports the balance, and first changes it when asked to: --reset
+// sets it back to zero, --use-up takes hours out of it.
+func overtime(store *worklog.Store, now time.Time, out io.Writer, args []string) error {
+	fs := flag.NewFlagSet("overtime", flag.ContinueOnError)
+	fs.SetOutput(out)
+	reset := fs.Bool("reset", false, "set the balance back to zero and count again from this week")
+	use := fs.String("use-up", "", "take these hours out of the balance, e.g. 8 for a day off")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q for `work overtime`", fs.Arg(0))
+	}
+	if *reset && *use != "" {
+		return fmt.Errorf("--reset and --use-up cannot be given together - a reset already zeroes the balance")
+	}
+
+	config, err := store.Config()
+	if err != nil {
+		return err
+	}
+	switch {
+	case *reset:
+		if config, err = resetOvertime(store, config, now, out); err != nil {
+			return err
+		}
+	case *use != "":
+		if config, err = useUpOvertime(store, config, *use, now, out); err != nil {
+			return err
+		}
+	}
+
+	report, err := store.Overtime(config, now)
+	if err != nil {
+		return err
+	}
+	printOvertime(out, report, config)
+	return nil
+}
+
+// resetOvertime starts the balance over from the Monday of the week that is
+// running, and returns the settings it saved. The cut is made on a week
+// boundary because whole weeks are what the balance is built out of.
+func resetOvertime(store *worklog.Store, config worklog.Config, now time.Time, out io.Writer) (worklog.Config, error) {
+	week := config.ResetOvertime(now)
+	if err := store.SaveConfig(config); err != nil {
+		return config, err
+	}
+	fmt.Fprintf(out, "Overtime reset. Counting again from %s.\n", dateLabel(week.StartDate()))
+	return config, nil
+}
+
+// useUpOvertime takes hours out of the balance, which is what a day off paid
+// for out of built up overtime does to it.
+func useUpOvertime(store *worklog.Store, config worklog.Config, value string, now time.Time, out io.Writer) (worklog.Config, error) {
+	used, err := parseUsedHours(value)
+	if err != nil {
+		return config, err
+	}
+	config.UseUp(used, now)
+	if err := store.SaveConfig(config); err != nil {
+		return config, err
+	}
+
+	if used < 0 {
+		fmt.Fprintf(out, "Put %s back into the balance.\n", duration(hours(-used)))
+	} else {
+		fmt.Fprintf(out, "Used up %s of overtime.\n", duration(hours(used)))
+	}
+	return config, nil
+}
+
+// printOvertime writes the balance and the figures behind it.
+func printOvertime(out io.Writer, report worklog.OvertimeReport, config worklog.Config) {
+	fmt.Fprintf(out, "Overtime: %s %s\n", balance(report.Balance()), countedWeeks(report))
+
+	if report.Weeks > 0 {
+		fmt.Fprintln(out, overtimeRow("Worked", duration(report.Worked), ""))
+		fmt.Fprintln(out, overtimeRow("Contracted", duration(report.Target),
+			"at "+target(config.WeeklyTarget())+" per week"))
+	}
+	switch {
+	case report.Used > 0:
+		fmt.Fprintln(out, overtimeRow("Used up", duration(report.Used), "taken out of the balance"))
+	case report.Used < 0:
+		fmt.Fprintln(out, overtimeRow("Put back", duration(-report.Used), "added to the balance"))
+	}
+
+	if report.Weeks == 0 {
+		fmt.Fprintln(out, "  Nothing counts until the week that is running is over.")
+		return
+	}
+	fmt.Fprintln(out, "  The week that is running does not count yet.")
+}
+
+// Column widths of the overtime figures, which are laid out as a label and a
+// right aligned duration so the totals line up under each other.
+const (
+	colLabel  = 11
+	colFigure = 9
+)
+
+func overtimeRow(label, figure, note string) string {
+	row := "  " + padRight(label+":", colLabel) + padLeft(figure, colFigure)
+	if note != "" {
+		row += "   " + note
+	}
+	return row
+}
+
+// countedWeeks says how much the balance was built out of: the stretch of
+// weeks it covers, or that there is none of it yet, in which case the reset it
+// is counting from is worth naming because that is what emptied it.
+func countedWeeks(report worklog.OvertimeReport) string {
+	if report.Weeks == 0 {
+		return "over no finished week" + countedSince(report)
+	}
+	return fmt.Sprintf("over %s (%s - %s)", plural(report.Weeks, "week"),
+		dateLabel(report.First.StartDate()), dateLabel(report.Last.EndDate()))
+}
+
+// contract reports the contracted week the overtime balance is measured
+// against, and sets it when given a figure.
+func contract(store *worklog.Store, out io.Writer, args []string) error {
+	config, err := store.Config()
+	if err != nil {
+		return err
+	}
+	if len(args) > 1 {
+		return fmt.Errorf("unexpected argument %q for `work hours`", args[1])
+	}
+	if len(args) == 0 {
+		fmt.Fprintf(out, "Contracted hours: %s per week\n", target(config.WeeklyTarget()))
+		return nil
+	}
+
+	weekly, err := parseWeeklyHours(args[0])
+	if err != nil {
+		return err
+	}
+	config.WeeklyHours = weekly
+	if err := store.SaveConfig(config); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Contracted hours set to %s per week.\n", target(config.WeeklyTarget()))
+	return nil
+}
+
+// parseWeeklyHours reads a contracted week off the command line, as a number
+// of hours with an optional h, e.g. 40, 37.5 or 35h.
+func parseWeeklyHours(value string) (float64, error) {
+	weekly, err := parseFloatHours(value)
+	if err != nil || weekly <= 0 || weekly > 7*24 {
+		return 0, fmt.Errorf("invalid weekly hours %q - use a number of hours, e.g. 40 or 37.5", value)
+	}
+	return weekly, nil
+}
+
+// parseUsedHours reads the hours to take out of the balance. A negative figure
+// puts hours back, which is how a withdrawal typed wrong is undone.
+func parseUsedHours(value string) (float64, error) {
+	used, err := parseFloatHours(value)
+	if err != nil || used == 0 || used < -weekHours || used > weekHours {
+		return 0, fmt.Errorf("invalid --use-up hours %q - use a number of hours, e.g. 8 or 7.5, or a negative one to put them back", value)
+	}
+	return used, nil
+}
+
+// weekHours bounds a single withdrawal at the hours in a week, which is far
+// more than a day off and still catches a figure typed in minutes.
+const weekHours = 7 * 24
+
+func parseFloatHours(value string) (float64, error) {
+	return strconv.ParseFloat(strings.TrimSuffix(value, "h"), 64)
+}
+
+// hours turns a number of hours into a duration, for rendering a figure that
+// came off the command line.
+func hours(h float64) time.Duration {
+	return time.Duration(math.Round(h*60)) * time.Minute
 }
 
 func textStatus(day *worklog.Day, now time.Time) string {
@@ -806,6 +1039,28 @@ func duration(d time.Duration) string {
 		return fmt.Sprintf("%dm", m)
 	}
 	return fmt.Sprintf("%dh %02dm", h, m)
+}
+
+// target renders contracted hours, dropping the minutes when a week divides
+// into whole hours, so the common 40 hour week reads as "40h".
+func target(d time.Duration) string {
+	if h, m := hm(d); m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return duration(d)
+}
+
+// balance renders an overtime figure with its sign, which is the whole point
+// of the line it sits on: hours owed read as a shortfall, not as time worked.
+func balance(d time.Duration) string {
+	switch d = d.Truncate(time.Minute); {
+	case d < 0:
+		return "-" + duration(-d)
+	case d == 0:
+		return "0m"
+	default:
+		return "+" + duration(d)
+	}
 }
 
 // compact renders a duration as "7h32m", without spaces, for the status bar.

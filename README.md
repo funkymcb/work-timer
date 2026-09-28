@@ -32,6 +32,8 @@ $ work stop
 | `work stop` | end the working day |
 | `work status` | show what the timer is doing right now |
 | `work week` | show the days and hours of this week |
+| `work hours` | show or set the contracted hours per week |
+| `work overtime` | show the overtime balance and what it is made of |
 | `work history` | list every record down to single entries |
 | `work where` | print the path of the work log directory |
 
@@ -40,7 +42,7 @@ entry at a time that has already passed, e.g. `work resume --at 13:07`.
 `work history` takes `--since DATE`, `--until DATE` and `--out text|json|yaml`.
 
 `work status` takes `--format text` (default) or `--format tmux` for a compact
-line.
+line. `work overtime` takes `--reset` and `--use-up HOURS`.
 
 Running `work start` again after a `work stop` opens a second session on the
 same day, so an evening shift is added to the day's total. The gap between the
@@ -100,13 +102,18 @@ The count is of the five weekdays. A Saturday or Sunday still counts into the
 totals and is called out separately (`· 2 of 5 weekdays + 1 weekend day`),
 because it would otherwise go unmentioned.
 
-`work status` prints the running week total underneath the day:
+`work status` prints the running week and the overtime balance underneath the
+day:
 
 ```console
 $ work status
 ▶ Working since 08:12 · 4h 18m worked · 0m on breaks
-  This week: 25h 21m over 3 of 5 weekdays (Mon 14 - Sun 20 Sep)
+  This week: 25h 21m / 40h over 3 of 5 weekdays (Mon 14 - Sun 20 Sep)
+  Overtime:  -3h 15m over 6 weeks
 ```
+
+The week that is running is on the first line only. It joins the balance once
+it is over, so the two lines never count the same hours twice.
 
 ### Days you forgot to log
 
@@ -130,6 +137,79 @@ a day that already has one stays quiet.
 
 Deliberate days off will be named too — the tool cannot tell a holiday from an
 oversight, which is exactly why it remarks rather than decides.
+
+## Contracted hours and overtime
+
+The week you are contracted for is the yardstick the hours are measured
+against. It defaults to 40 and is set once:
+
+```console
+$ work hours 37.5
+Contracted hours set to 37h 30m per week.
+
+$ work hours
+Contracted hours: 37h 30m per week
+```
+
+Overtime is then the hours worked against a contracted week for every
+**finished** week that has anything on record — worked 37 of 40 hours in a
+week and the balance is 3 hours down. It accumulates for as long as you keep
+the log:
+
+```console
+$ work overtime
+Overtime: +4h 00m over 6 weeks (Mon 03 Aug - Sun 13 Sep)
+  Worked:     244h 00m
+  Contracted: 240h 00m   at 40h per week
+  The week that is running does not count yet.
+```
+
+Two rules decide which weeks are owed:
+
+- **The week that is running is left out** until it is over. It is only ever
+  part worked, so counting it would show the whole of it as owed on a Monday
+  morning and walk the balance back up over the week. `work status` reports it
+  on its own line instead.
+- **Weeks with nothing logged at all are left out** for good — holidays, sick
+  leave and the stretch before you started keeping the log are not hours that
+  went missing. A week that is only partly logged is still measured against the
+  whole contracted week, so a single day off inside a working week does read as
+  a shortfall. Take it out of the balance, or log the day, if it should not.
+
+### Taking a day off out of the balance
+
+`work overtime --use-up HOURS` takes hours off the balance, which is what a day
+off paid for out of built up overtime does to it:
+
+```console
+$ work overtime --use-up 8
+Used up 8h 00m of overtime.
+Overtime: -4h 00m over 6 weeks (Mon 03 Aug - Sun 13 Sep)
+  Worked:     244h 00m
+  Contracted: 240h 00m   at 40h per week
+  Used up:      8h 00m   taken out of the balance
+  The week that is running does not count yet.
+```
+
+Each withdrawal is kept in `config.json` with the date it was made. A negative
+figure puts hours back, so `--use-up -8` undoes the line above.
+
+### Starting the balance over
+
+`work overtime --reset` sets the balance back to zero and counts again from the
+Monday of the week that is running — the closing entry for a balance that has
+been paid out or written off:
+
+```console
+$ work overtime --reset
+Overtime reset. Counting again from Mon 14 Sep.
+Overtime: 0m over no finished week (since Mon 14 Sep)
+  Nothing counts until the week that is running is over.
+```
+
+The cut is made on a week boundary because whole weeks are what the balance is
+built out of. The withdrawals go with it: they came out of a balance that no
+longer exists.
 
 ## History
 
@@ -302,10 +382,12 @@ One JSON file per calendar day, written atomically with `0600` permissions:
 
 ```
 2026-09-15.json   a day, with its sessions and breaks
+config.json       contracted hours, the overtime reset and the withdrawals
 ```
 
-Day files are the only record there is; week totals are derived from the dates
-of the days themselves. `week-*.json` files written by earlier versions are
+Day files are the only record of hours there is; week totals are derived from
+the dates of the days themselves, and `config.json` only holds what cannot be
+worked out from them. `week-*.json` files written by earlier versions are
 ignored and can be deleted.
 
 The directory follows `$WORK_TIMER_DIR`, then `$XDG_DATA_HOME/work-timer`, and
@@ -345,7 +427,3 @@ path (`#(/Users/you/go/bin/work status -f tmux)`) if the segment stays empty.
 ```sh
 go test ./...
 ```
-
-## TODOs
-
-- [ ] add contract week hours (default to 40) and calculate access or minus hours

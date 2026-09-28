@@ -474,3 +474,291 @@ func mutatePause(store *worklog.Store, at time.Time) error {
 	_, err := mutate(store, at, at, io.Discard, (*worklog.Day).Pause, reportPause)
 	return err
 }
+
+func TestTargetAndBalance(t *testing.T) {
+	tests := []struct {
+		in          time.Duration
+		wantTarget  string
+		wantBalance string
+	}{
+		{40 * time.Hour, "40h", "+40h 00m"},
+		{37*time.Hour + 30*time.Minute, "37h 30m", "+37h 30m"},
+		{0, "0h", "0m"},
+		{-3 * time.Hour, "0h", "-3h 00m"},
+		{-(2*time.Hour + 30*time.Minute + 20*time.Second), "0h", "-2h 30m"},
+		{45 * time.Second, "0h", "0m"},
+	}
+
+	for _, tc := range tests {
+		if got := target(tc.in); got != tc.wantTarget {
+			t.Errorf("target(%v) = %q, want %q", tc.in, got, tc.wantTarget)
+		}
+		if got := balance(tc.in); got != tc.wantBalance {
+			t.Errorf("balance(%v) = %q, want %q", tc.in, got, tc.wantBalance)
+		}
+	}
+}
+
+// workedDay records a finished day of the given length, starting at 08:00 the
+// given number of days off the Tuesday the other tests sit on.
+func workedDay(t *testing.T, store *worklog.Store, offset, hours int) {
+	t.Helper()
+	day := worklog.NewDay(at(8, 0).AddDate(0, 0, offset))
+	mustDo(t, day.Start(at(8, 0).AddDate(0, 0, offset)))
+	mustDo(t, day.Stop(at(8+hours, 0).AddDate(0, 0, offset)))
+	mustDo(t, store.Save(day))
+}
+
+func TestStatusMeasuresTheWeekAgainstTheContractedHours(t *testing.T) {
+	store := worklog.NewStore(t.TempDir())
+	workedDay(t, store, -5, 8) // Thursday of the week before
+	workedDay(t, store, -1, 8) // Monday
+	workedDay(t, store, 0, 8)  // Tuesday, the day being reported
+
+	var out strings.Builder
+	if err := status(store, at(17, 0), &out, nil); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	// The 16 hours of the week that is running are on their own line and not
+	// in the balance, which is the finished week before it: 8 of 40 hours.
+	want := strings.Join([]string{
+		"⏹ Done at 16:00 · 8h 00m worked · 0m on breaks",
+		"  This week: 16h 00m / 40h over 2 of 5 weekdays (Mon 09 - Sun 15 Mar)",
+		"  Overtime:  -32h 00m over 1 week",
+		"",
+	}, "\n")
+
+	if got := out.String(); got != want {
+		t.Errorf("status output:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestStatusLeavesOutABalanceWithNoFinishedWeekBehindIt(t *testing.T) {
+	store := worklog.NewStore(t.TempDir())
+	workedDay(t, store, 0, 8) // the only day on record, in the week that runs
+
+	var out strings.Builder
+	if err := status(store, at(17, 0), &out, nil); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	if got := out.String(); strings.Contains(got, "Overtime") {
+		t.Errorf("status output:\n%s\nwant no overtime line while the first week is still running", got)
+	}
+}
+
+func TestStatusOvertimeFollowsTheContractedHours(t *testing.T) {
+	store := worklog.NewStore(t.TempDir())
+	for _, offset := range []int{-1, 0, 1, 2, 3} { // Monday to Friday, 8h each
+		workedDay(t, store, offset, 8)
+	}
+	mustDo(t, store.SaveConfig(worklog.Config{WeeklyHours: 37.5}))
+
+	var out strings.Builder
+	if err := status(store, at(17, 0).AddDate(0, 0, 7), &out, nil); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	want := "  Overtime:  +2h 30m over 1 week\n"
+	if got := out.String(); !strings.Contains(got, want) {
+		t.Errorf("status output:\n%s\nwant a line %q", got, want)
+	}
+}
+
+func TestOvertimeReportsWhatTheBalanceIsMadeOf(t *testing.T) {
+	store := worklog.NewStore(t.TempDir())
+	workedDay(t, store, -5, 8) // Thursday of the week before
+	workedDay(t, store, -4, 8) // Friday of the week before
+	workedDay(t, store, 0, 8)  // Tuesday of the week that is running
+
+	var out strings.Builder
+	if err := overtime(store, at(17, 0), &out, nil); err != nil {
+		t.Fatalf("overtime: %v", err)
+	}
+
+	want := strings.Join([]string{
+		"Overtime: -24h 00m over 1 week (Mon 02 Mar - Sun 08 Mar)",
+		"  Worked:      16h 00m",
+		"  Contracted:  40h 00m   at 40h per week",
+		"  The week that is running does not count yet.",
+		"",
+	}, "\n")
+
+	if got := out.String(); got != want {
+		t.Errorf("overtime output:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestOvertimeUseUpTakesHoursOutOfTheBalance(t *testing.T) {
+	store := worklog.NewStore(t.TempDir())
+	workedDay(t, store, -5, 8)
+	workedDay(t, store, -4, 8)
+
+	var out strings.Builder
+	if err := overtime(store, at(17, 0), &out, []string{"--use-up", "8"}); err != nil {
+		t.Fatalf("overtime: %v", err)
+	}
+
+	want := strings.Join([]string{
+		"Used up 8h 00m of overtime.",
+		"Overtime: -32h 00m over 1 week (Mon 02 Mar - Sun 08 Mar)",
+		"  Worked:      16h 00m",
+		"  Contracted:  40h 00m   at 40h per week",
+		"  Used up:      8h 00m   taken out of the balance",
+		"  The week that is running does not count yet.",
+		"",
+	}, "\n")
+
+	if got := out.String(); got != want {
+		t.Errorf("overtime output:\n%s\nwant:\n%s", got, want)
+	}
+
+	// The withdrawal is on record, dated the day it was made.
+	config, err := store.Config()
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if got, want := config.OvertimeUsed, []worklog.UsedUp{{Date: "2026-03-10", Hours: 8}}; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("withdrawals = %+v, want %+v", got, want)
+	}
+}
+
+func TestOvertimeUseUpTakesANegativeToPutHoursBack(t *testing.T) {
+	store := worklog.NewStore(t.TempDir())
+	workedDay(t, store, -5, 8)
+
+	var out strings.Builder
+	mustDo(t, overtime(store, at(17, 0), &out, []string{"--use-up", "8"}))
+	out.Reset()
+	mustDo(t, overtime(store, at(17, 0), &out, []string{"--use-up", "-8"}))
+
+	if got, want := out.String(), "Put 8h 00m back into the balance.\n"; !strings.HasPrefix(got, want) {
+		t.Errorf("overtime output:\n%s\nwant it to open with %q", got, want)
+	}
+	if got := out.String(); strings.Contains(got, "Used up") {
+		t.Errorf("overtime output:\n%s\nwant no withdrawal left once it is undone", got)
+	}
+}
+
+func TestOvertimeResetCountsAgainFromThisWeek(t *testing.T) {
+	store := worklog.NewStore(t.TempDir())
+	workedDay(t, store, -5, 8) // Thursday of the week before
+	workedDay(t, store, 0, 8)  // Tuesday of this one
+
+	var out strings.Builder
+	mustDo(t, overtime(store, at(17, 0), &out, []string{"--use-up", "2"}))
+	out.Reset()
+
+	if err := overtime(store, at(17, 0), &out, []string{"--reset"}); err != nil {
+		t.Fatalf("overtime: %v", err)
+	}
+
+	want := strings.Join([]string{
+		"Overtime reset. Counting again from Mon 09 Mar.",
+		"Overtime: 0m over no finished week (since Mon 09 Mar)",
+		"  Nothing counts until the week that is running is over.",
+		"",
+	}, "\n")
+
+	if got := out.String(); got != want {
+		t.Errorf("overtime output:\n%s\nwant:\n%s", got, want)
+	}
+
+	config, err := store.Config()
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if got, want := config.OvertimeSince, "2026-03-09"; got != want {
+		t.Errorf("overtime since = %q, want %q - the reset has to outlive the command", got, want)
+	}
+	if config.OvertimeUsed != nil {
+		t.Errorf("withdrawals = %+v, want none after a reset", config.OvertimeUsed)
+	}
+}
+
+func TestOvertimeRefusesToResetAndUseUpAtOnce(t *testing.T) {
+	store := worklog.NewStore(t.TempDir())
+	var out strings.Builder
+	if err := overtime(store, at(17, 0), &out, []string{"--reset", "--use-up", "8"}); err == nil {
+		t.Error("overtime() = nil, want an error - a reset already zeroes the balance")
+	}
+}
+
+func TestHoursShowsAndSetsTheContractedWeek(t *testing.T) {
+	store := worklog.NewStore(t.TempDir())
+
+	var out strings.Builder
+	mustDo(t, contract(store, &out, nil))
+	if got, want := out.String(), "Contracted hours: 40h per week\n"; got != want {
+		t.Errorf("contract() = %q, want %q", got, want)
+	}
+
+	out.Reset()
+	mustDo(t, contract(store, &out, []string{"37.5"}))
+	if got, want := out.String(), "Contracted hours set to 37h 30m per week.\n"; got != want {
+		t.Errorf("contract(37.5) = %q, want %q", got, want)
+	}
+
+	out.Reset()
+	mustDo(t, contract(store, &out, nil))
+	if got, want := out.String(), "Contracted hours: 37h 30m per week\n"; got != want {
+		t.Errorf("contract() after setting = %q, want %q", got, want)
+	}
+}
+
+func TestParseWeeklyHours(t *testing.T) {
+	tests := []struct {
+		value   string
+		want    float64
+		wantErr bool
+	}{
+		{value: "40", want: 40},
+		{value: "37.5", want: 37.5},
+		{value: "35h", want: 35},
+		{value: "0", wantErr: true},
+		{value: "-8", wantErr: true},
+		{value: "200", wantErr: true},
+		{value: "", wantErr: true},
+		{value: "part time", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		got, err := parseWeeklyHours(tc.value)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("parseWeeklyHours(%q) error = %v, want error %v", tc.value, err, tc.wantErr)
+			continue
+		}
+		if err == nil && got != tc.want {
+			t.Errorf("parseWeeklyHours(%q) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
+func TestParseUsedHours(t *testing.T) {
+	tests := []struct {
+		value   string
+		want    float64
+		wantErr bool
+	}{
+		{value: "8", want: 8},
+		{value: "7.5", want: 7.5},
+		{value: "4h", want: 4},
+		{value: "-8", want: -8}, // puts hours back
+		{value: "0", wantErr: true},
+		{value: "200", wantErr: true},
+		{value: "", wantErr: true},
+		{value: "a day", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		got, err := parseUsedHours(tc.value)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("parseUsedHours(%q) error = %v, want error %v", tc.value, err, tc.wantErr)
+			continue
+		}
+		if err == nil && got != tc.want {
+			t.Errorf("parseUsedHours(%q) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
