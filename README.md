@@ -324,7 +324,7 @@ yesterday's session is still open, the commands keep operating on yesterday.
 ▶ 4h18m       working, 4h18m worked so far
 ⏸ 12m         on a break that started 12 minutes ago
 ⏹ 8h36m       done for the day
-⏹ none   the day has not been started
+⏹ 󰒲           the day has not been started
 ```
 
 The symbols are `iconPlay`/`iconPause`/`iconStop` in `cmd/work/main.go`; swap
@@ -345,3 +345,7 @@ path (`#(/Users/you/go/bin/work status -f tmux)`) if the segment stays empty.
 ```sh
 go test ./...
 ```
+
+## TODOs
+
+- [ ] add contract week hours (default to 40) and calculate access or minus hours
